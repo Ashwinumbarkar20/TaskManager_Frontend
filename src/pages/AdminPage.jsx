@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { LoaderCircle, LogOut } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -24,7 +24,7 @@ function AdminPage() {
     return undefined
   }, [activeFilter])
 
-  const loadDashboard = async () => {
+  const loadDashboard = useCallback(async () => {
     try {
       setLoadingDashboard(true)
       const response = await apiClient.get('/admin/dashboard')
@@ -34,9 +34,9 @@ function AdminPage() {
     } finally {
       setLoadingDashboard(false)
     }
-  }
+  }, [])
 
-  const loadUsers = async (searchValue = search) => {
+  const loadUsers = useCallback(async (searchValue = '') => {
     try {
       setLoadingUsers(true)
       const params = { page: 1, limit: 50 }
@@ -49,32 +49,56 @@ function AdminPage() {
     } finally {
       setLoadingUsers(false)
     }
-  }
+  }, [usersFilterParam])
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadDashboard()
+  }, [loadDashboard])
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadUsers()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [usersFilterParam])
+  }, [usersFilterParam, loadUsers])
+
+  const handleSearch = () => {
+    loadUsers(search)
+  }
+
+  const handleClearSearch = () => {
+    setSearch('')
+    loadUsers('')
+  }
 
   const handleToggleUserStatus = async (targetUser) => {
     const nextIsActive = !targetUser.isActive
     const previousUsers = users
+    const previousDashboard = dashboard
     const optimisticUsers = users.map((item) =>
       item._id === targetUser._id ? { ...item, isActive: nextIsActive } : item,
     )
 
     setUsers(optimisticUsers)
+    setDashboard((prev) => {
+      if (!prev?.users) return prev
+      return {
+        ...prev,
+        users: {
+          ...prev.users,
+          active: prev.users.active + (nextIsActive ? 1 : -1),
+          inactive: prev.users.inactive + (nextIsActive ? -1 : 1),
+        },
+      }
+    })
     setUpdatingUserId(targetUser._id)
     try {
       await apiClient.patch(`/admin/users/${targetUser._id}/status`, {
         isActive: nextIsActive,
       })
       setMessage(`User ${nextIsActive ? 'activated' : 'deactivated'} successfully.`)
-      loadDashboard()
     } catch (error) {
       setUsers(previousUsers)
+      setDashboard(previousDashboard)
       setMessage(getApiErrorMessage(error, 'Unable to update user status'))
     } finally {
       setUpdatingUserId('')
@@ -172,15 +196,15 @@ function AdminPage() {
               <Input
                 placeholder="Search users by name/email"
                 value={search}
-                onChange={(event) => {
-                  const nextValue = event.target.value
-                  setSearch(nextValue)
-                  if (!nextValue.trim()) {
-                    loadUsers('')
-                  }
+                onChange={(event) => setSearch(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') handleSearch()
                 }}
               />
-              <Button variant="outline" onClick={() => loadUsers(search)}>Search</Button>
+              <Button variant="outline" onClick={handleSearch}>Search</Button>
+              {search.trim() ? (
+                <Button variant="ghost" onClick={handleClearSearch}>Clear</Button>
+              ) : null}
             </div>
           </div>
 

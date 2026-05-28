@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { LoaderCircle, LogOut, Plus, X } from 'lucide-react'
 import TaskCard from '@/components/tasks/TaskCard'
 import TaskForm from '@/components/tasks/TaskForm'
@@ -7,6 +7,31 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { apiClient, getApiErrorMessage } from '@/lib/api'
 import { useAuth } from '@/context/AuthContext'
+
+function summaryDeltaForStatus(status, sign = 1) {
+  const s = sign
+  if (status === 'completed') return { total: s, completed: s, pending: 0 }
+  if (status === 'pending') return { total: s, completed: 0, pending: s }
+  return { total: s, completed: 0, pending: 0 }
+}
+
+function applySummaryDelta(prev, delta) {
+  return {
+    total: Math.max(0, prev.total + (delta.total ?? 0)),
+    completed: Math.max(0, prev.completed + (delta.completed ?? 0)),
+    pending: Math.max(0, prev.pending + (delta.pending ?? 0)),
+  }
+}
+
+function summaryDeltaForStatusChange(fromStatus, toStatus) {
+  const remove = summaryDeltaForStatus(fromStatus, -1)
+  const add = summaryDeltaForStatus(toStatus, 1)
+  return {
+    total: remove.total + add.total,
+    completed: remove.completed + add.completed,
+    pending: remove.pending + add.pending,
+  }
+}
 
 function DashboardPage() {
   const { user, logout } = useAuth()
@@ -20,10 +45,10 @@ function DashboardPage() {
   const [showCreate, setShowCreate] = useState(false)
   const [editTask, setEditTask] = useState(null)
 
-  const loadTasks = async (searchValue = search) => {
+  const loadTasks = useCallback(async (searchValue = '') => {
     try {
       setLoading(true)
-      const params = {}
+      const params = { page: 1, limit: 100 }
       if (filter !== 'all') params.status = filter
       if (searchValue.trim()) params.search = searchValue.trim()
       const response = await apiClient.get('/tasks', { params })
@@ -33,9 +58,9 @@ function DashboardPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [filter])
 
-  const loadSummary = async () => {
+  const loadSummary = useCallback(async () => {
     try {
       const [allRes, completedRes, pendingRes] = await Promise.all([
         apiClient.get('/tasks', { params: { page: 1, limit: 1 } }),
@@ -51,16 +76,26 @@ function DashboardPage() {
     } catch {
       // Keep the previous summary if this fails.
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadSummary()
+  }, [loadSummary])
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadTasks()
-    loadSummary()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter])
+  }, [filter, loadTasks])
 
-  const taskStats = useMemo(() => summary, [summary])
+  const handleSearch = () => {
+    loadTasks(search)
+  }
+
+  const handleClearSearch = () => {
+    setSearch('')
+    loadTasks('')
+  }
 
   const handleCreate = async (payload) => {
     try {
@@ -74,10 +109,10 @@ function DashboardPage() {
         if (matchesFilter && matchesSearch) {
           setTasks((prev) => [createdTask, ...prev])
         }
+        setSummary((prev) => applySummaryDelta(prev, summaryDeltaForStatus(createdTask.status, 1)))
       }
       setShowCreate(false)
       setMessage('Task created successfully.')
-      loadSummary()
     } catch (error) {
       setMessage(getApiErrorMessage(error, 'Unable to create task'))
     } finally {
@@ -88,11 +123,16 @@ function DashboardPage() {
   const handleUpdate = async (payload) => {
     if (!editTask) return
     const previousTasks = tasks
+    const previousSummary = summary
     const updatedTask = { ...editTask, ...payload }
     const matchesCurrentFilter = filter === 'all' || updatedTask.status === filter
     const optimisticTasks = matchesCurrentFilter
       ? tasks.map((item) => (item._id === editTask._id ? updatedTask : item))
       : tasks.filter((item) => item._id !== editTask._id)
+
+    if (payload.status && payload.status !== editTask.status) {
+      setSummary((prev) => applySummaryDelta(prev, summaryDeltaForStatusChange(editTask.status, payload.status)))
+    }
 
     try {
       setSubmitting(true)
@@ -100,9 +140,9 @@ function DashboardPage() {
       await apiClient.put(`/tasks/${editTask._id}`, payload)
       setEditTask(null)
       setMessage('Task updated successfully.')
-      loadSummary()
     } catch (error) {
       setTasks(previousTasks)
+      setSummary(previousSummary)
       setMessage(getApiErrorMessage(error, 'Unable to update task'))
     } finally {
       setSubmitting(false)
@@ -111,32 +151,36 @@ function DashboardPage() {
 
   const handleDelete = async (task) => {
     const previousTasks = tasks
+    const previousSummary = summary
     const optimisticTasks = tasks.filter((item) => item._id !== task._id)
+    setTasks(optimisticTasks)
+    setSummary((prev) => applySummaryDelta(prev, summaryDeltaForStatus(task.status, -1)))
     try {
-      setTasks(optimisticTasks)
       await apiClient.delete(`/tasks/${task._id}`)
       setMessage('Task deleted successfully.')
-      loadSummary()
     } catch (error) {
       setTasks(previousTasks)
+      setSummary(previousSummary)
       setMessage(getApiErrorMessage(error, 'Unable to delete task'))
     }
   }
 
   const handleToggleStatus = async (task, nextStatus) => {
     const previousTasks = tasks
+    const previousSummary = summary
     const isFilteredOut = filter !== 'all' && nextStatus !== filter
     const optimisticTasks = isFilteredOut
       ? tasks.filter((item) => item._id !== task._id)
       : tasks.map((item) => (item._id === task._id ? { ...item, status: nextStatus } : item))
 
     setTasks(optimisticTasks)
+    setSummary((prev) => applySummaryDelta(prev, summaryDeltaForStatusChange(task.status, nextStatus)))
     try {
       await apiClient.put(`/tasks/${task._id}`, { status: nextStatus })
       setMessage(`Task marked as ${nextStatus === 'completed' ? 'completed' : 'pending'}.`)
-      loadSummary()
     } catch (error) {
       setTasks(previousTasks)
+      setSummary(previousSummary)
       setMessage(getApiErrorMessage(error, 'Unable to update task status'))
     }
   }
@@ -156,9 +200,9 @@ function DashboardPage() {
         </header>
 
         <section className="grid gap-3 sm:grid-cols-3">
-          <Card><CardHeader className="pb-2"><CardTitle className="text-sm">Total</CardTitle></CardHeader><CardContent className="text-2xl font-semibold">{taskStats.total}</CardContent></Card>
-          <Card><CardHeader className="pb-2"><CardTitle className="text-sm">Completed</CardTitle></CardHeader><CardContent className="text-2xl font-semibold">{taskStats.completed}</CardContent></Card>
-          <Card><CardHeader className="pb-2"><CardTitle className="text-sm">Pending</CardTitle></CardHeader><CardContent className="text-2xl font-semibold">{taskStats.pending}</CardContent></Card>
+          <Card><CardHeader className="pb-2"><CardTitle className="text-sm">Total</CardTitle></CardHeader><CardContent className="text-2xl font-semibold">{summary.total}</CardContent></Card>
+          <Card><CardHeader className="pb-2"><CardTitle className="text-sm">Completed</CardTitle></CardHeader><CardContent className="text-2xl font-semibold">{summary.completed}</CardContent></Card>
+          <Card><CardHeader className="pb-2"><CardTitle className="text-sm">Pending</CardTitle></CardHeader><CardContent className="text-2xl font-semibold">{summary.pending}</CardContent></Card>
         </section>
 
         <section className="rounded-lg border bg-background p-4 space-y-4">
@@ -172,15 +216,15 @@ function DashboardPage() {
               <Input
                 placeholder="Search by title/description"
                 value={search}
-                onChange={(event) => {
-                  const nextValue = event.target.value
-                  setSearch(nextValue)
-                  if (!nextValue.trim()) {
-                    loadTasks('')
-                  }
+                onChange={(event) => setSearch(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') handleSearch()
                 }}
               />
-              <Button variant="outline" onClick={() => loadTasks(search)}>Search</Button>
+              <Button variant="outline" onClick={handleSearch}>Search</Button>
+              {search.trim() ? (
+                <Button variant="ghost" onClick={handleClearSearch}>Clear</Button>
+              ) : null}
             </div>
             <Button onClick={() => setShowCreate((prev) => !prev)}>
               <Plus className="mr-2 size-4" />
